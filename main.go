@@ -23,7 +23,7 @@ var (
 
 func init() {
 	log.SetFlags(log.Lshortfile)
-	flag.StringVar(&watchTarget, "f", "", "watch file")
+	flag.StringVar(&watchTarget, "f", "./", "watch target")
 }
 
 func main() {
@@ -68,7 +68,6 @@ func walk(ctx context.Context, target string, e chan struct{}) {
 		panic(err)
 	}
 	for _, v := range files {
-		// validate
 		if v.Name() != target {
 			if v.IsDir() {
 				walk(ctx, path.Join(target, v.Name()), e)
@@ -110,11 +109,11 @@ func runCommand(ctx context.Context, command []string, e chan struct{}) {
 	for {
 		select {
 		case <-ctx.Done():
-			cmdProcess.KillAll()
+			cmdProcess.StopAll()
 			fmt.Println("\ncanceled")
 			return
 		case <-e:
-			cmdProcess.KillAll()
+			cmdProcess.StopAll()
 			cmd := exec.Command(command[0], command[1:]...)
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
@@ -142,14 +141,14 @@ func (p *Process) SetProcess(process *os.Process) {
 	p.process = append(p.process, process)
 }
 
-func (p *Process) KillAll() {
+func (p *Process) StopAll() {
 	p.RLock()
 	defer p.RUnlock()
-	pp := make([]*os.Process, 0, len(p.process))
+	pp := make([]*os.Process, len(p.process))
 	copy(pp, p.process)
 	for i, v := range pp {
-		fmt.Printf("kill process: %d", v.Pid)
-		if err := v.Kill(); err != nil {
+		fmt.Printf("stop process: %d", v.Pid)
+		if err := v.Signal(syscall.SIGTERM); err != nil {
 			panic(err)
 		}
 		fmt.Println(" - ok")
