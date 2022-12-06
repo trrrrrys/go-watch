@@ -27,6 +27,13 @@ func init() {
 }
 
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stdout, "watch error: %v", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	flag.Parse()
 	filename := watchTarget
 	command := flag.Args()
@@ -34,12 +41,12 @@ func main() {
 	fmt.Fprintf(os.Stdout, "exec: %s\n", strings.Join(command, " "))
 	events := make(chan struct{}, 1)
 
-	ctx, cancel := context.WithCancel(context.Background())
-
 	st, err := os.Stat(filename)
 	if err != nil {
-		panic(err)
+		return err
 	}
+
+	ctx, cancel := context.WithCancel(context.Background())
 	if st.IsDir() {
 		walk(ctx, filename, events)
 	} else {
@@ -55,7 +62,8 @@ func main() {
 
 	// 初回プロセス用
 	events <- struct{}{}
-	runCommand(ctx, command, events)
+	cmd := NewCommand(command)
+	return cmd.Run(ctx, events)
 }
 
 func walk(ctx context.Context, target string, e chan struct{}) {
@@ -90,7 +98,7 @@ func watch(ctx context.Context, filename string, e chan struct{}) {
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println("canceled")
+			fmt.Fprintf(os.Stdout, "canxel\n")
 			return
 		default:
 			info, _ := os.Stat(filename)
@@ -105,53 +113,58 @@ func watch(ctx context.Context, filename string, e chan struct{}) {
 	}
 }
 
-func runCommand(ctx context.Context, command []string, e chan struct{}) {
+type Command struct {
+	cmd     []string
+	process []*os.Process
+	sync.Mutex
+}
+
+func NewCommand(cmd []string) *Command {
+	return &Command{
+		cmd: cmd,
+	}
+}
+
+func (c *Command) Run(ctx context.Context, e chan struct{}) error {
 	for {
 		select {
 		case <-ctx.Done():
-			cmdProcess.StopAll()
-			fmt.Println("\ncanceled")
-			return
+			c.KillAll()
+			return fmt.Errorf("canceled")
 		case <-e:
-			cmdProcess.StopAll()
-			cmd := exec.Command(command[0], command[1:]...)
+			c.KillAll()
+			cmd := exec.CommandContext(ctx, c.cmd[0], c.cmd[1:]...)
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			err := cmd.Start()
-			fmt.Println("start process: ", cmd.Process.Pid)
-			cmdProcess.SetProcess(cmd.Process)
+			c.SetProcess(cmd.Process)
 			if err != nil {
-				panic(err)
+				return err
 			}
 		}
 
 	}
 }
 
-var cmdProcess = &Process{}
-
-type Process struct {
-	process []*os.Process
-	sync.RWMutex
+func (c *Command) SetProcess(p *os.Process) {
+	c.Lock()
+	defer c.Unlock()
+	fmt.Fprintf(os.Stdout, "start process: %d\n", p.Pid)
+	c.process = append(c.process, p)
 }
 
-func (p *Process) SetProcess(process *os.Process) {
+func (p *Command) KillAll() {
 	p.Lock()
 	defer p.Unlock()
-	p.process = append(p.process, process)
-}
-
-func (p *Process) StopAll() {
-	p.RLock()
-	defer p.RUnlock()
 	pp := make([]*os.Process, len(p.process))
 	copy(pp, p.process)
 	for i, v := range pp {
-		fmt.Printf("stop process: %d", v.Pid)
-		if err := v.Signal(syscall.SIGTERM); err != nil {
+		fmt.Fprintf(os.Stdout, "terminate process: %d", v.Pid)
+		if err := syscall.Kill(-v.Pid, syscall.SIGTERM); err != nil {
 			panic(err)
 		}
-		fmt.Println(" - ok")
+		fmt.Fprintf(os.Stdout, " - ok\n")
 		p.process = slices.Delete(p.process, i, i+1)
 	}
 }
