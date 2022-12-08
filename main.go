@@ -18,12 +18,18 @@ import (
 )
 
 var (
-	watchTarget string
+	watchTarget   string
+	watchInterval int
+	tick          int
 )
+
+const defaultTarget = "./"
 
 func init() {
 	log.SetFlags(log.Lshortfile)
-	flag.StringVar(&watchTarget, "f", "./", "watch target")
+	flag.StringVar(&watchTarget, "f", "", "watch target. if not specified, the current directory is the target.")
+	flag.IntVar(&watchInterval, "w", 100, "watch interval (ms)")
+	flag.IntVar(&tick, "t", 0, "run every t ms")
 }
 
 func main() {
@@ -35,30 +41,49 @@ func main() {
 
 func run() error {
 	flag.Parse()
-	filename := watchTarget
 	command := flag.Args()
+	wt := watchTarget
 
-	fmt.Fprintf(os.Stdout, "exec: %s\n", strings.Join(command, " "))
 	events := make(chan struct{}, 1)
-
-	st, err := os.Stat(filename)
-	if err != nil {
-		return err
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
-	if st.IsDir() {
-		walk(ctx, filename, events)
+	defer cancel()
+
+	if tick != 0 {
+		go func() {
+			t := time.Tick(time.Duration(tick) * time.Second)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t:
+					events <- struct{}{}
+				}
+
+			}
+		}()
 	} else {
-		go watch(ctx, filename, events)
+		wt = defaultTarget
 	}
 
-	go func() {
-		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
-		<-sig
-		cancel()
-	}()
+	if wt != "" {
+		st, err := os.Stat(wt)
+		if err != nil {
+			return err
+		}
+
+		if st.IsDir() {
+			walk(ctx, wt, events)
+		} else {
+			go watch(ctx, wt, events)
+		}
+
+		go func() {
+			sig := make(chan os.Signal, 1)
+			signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+			<-sig
+			cancel()
+		}()
+	}
 
 	// 初回プロセス用
 	events <- struct{}{}
@@ -107,21 +132,21 @@ func watch(ctx context.Context, filename string, e chan struct{}) {
 				lastModified = info.ModTime()
 				e <- struct{}{}
 			}
-
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(time.Duration(watchInterval) * time.Millisecond)
 		}
 	}
 }
 
 type Command struct {
-	cmd     []string
-	process []*os.Process
+	cmdStrings []string
+	cmdProcess []*exec.Cmd
 	sync.Mutex
 }
 
 func NewCommand(cmd []string) *Command {
+	fmt.Fprintf(os.Stdout, "exec: %s\n", strings.Join(cmd, " "))
 	return &Command{
-		cmd: cmd,
+		cmdStrings: cmd,
 	}
 }
 
@@ -132,14 +157,7 @@ func (c *Command) Run(ctx context.Context, e chan struct{}) error {
 			c.KillAll()
 			return fmt.Errorf("canceled")
 		case <-e:
-			c.KillAll()
-			cmd := exec.CommandContext(ctx, c.cmd[0], c.cmd[1:]...)
-			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			err := cmd.Start()
-			c.SetProcess(cmd.Process)
-			if err != nil {
+			if err := c.Start(ctx); err != nil {
 				return err
 			}
 		}
@@ -147,24 +165,34 @@ func (c *Command) Run(ctx context.Context, e chan struct{}) error {
 	}
 }
 
-func (c *Command) SetProcess(p *os.Process) {
+func (c *Command) Start(ctx context.Context) error {
+	c.KillAll()
+	cmd := exec.CommandContext(ctx, c.cmdStrings[0], c.cmdStrings[1:]...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return err
+	}
 	c.Lock()
 	defer c.Unlock()
-	fmt.Fprintf(os.Stdout, "start process: %d\n", p.Pid)
-	c.process = append(c.process, p)
+	fmt.Fprintf(os.Stdout, "start process: %d\n", cmd.Process.Pid)
+	c.cmdProcess = append(c.cmdProcess, cmd)
+	return nil
 }
 
 func (p *Command) KillAll() {
 	p.Lock()
 	defer p.Unlock()
-	pp := make([]*os.Process, len(p.process))
-	copy(pp, p.process)
+	pp := make([]*exec.Cmd, len(p.cmdProcess))
+	copy(pp, p.cmdProcess)
 	for i, v := range pp {
-		fmt.Fprintf(os.Stdout, "terminate process: %d", v.Pid)
-		if err := syscall.Kill(-v.Pid, syscall.SIGTERM); err != nil {
+		fmt.Fprintf(os.Stdout, "terminate process: %d", v.Process.Pid)
+		if err := syscall.Kill(-v.Process.Pid, syscall.SIGTERM); err != nil && err != syscall.EPERM {
 			panic(err)
 		}
 		fmt.Fprintf(os.Stdout, " - ok\n")
-		p.process = slices.Delete(p.process, i, i+1)
+		_, _ = v.Process.Wait()
+		p.cmdProcess = slices.Delete(p.cmdProcess, i, i+1)
 	}
 }
