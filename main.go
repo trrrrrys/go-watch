@@ -138,7 +138,7 @@ func watch(ctx context.Context, filename string, e chan struct{}) {
 }
 
 type Command struct {
-	cmdStrings []string
+	cmdString  string
 	cmdProcess []*exec.Cmd
 	sync.Mutex
 }
@@ -146,7 +146,7 @@ type Command struct {
 func NewCommand(cmd []string) *Command {
 	fmt.Fprintf(os.Stdout, "exec: %s\n", strings.Join(cmd, " "))
 	return &Command{
-		cmdStrings: cmd,
+		cmdString: strings.Join(cmd, " "),
 	}
 }
 
@@ -167,7 +167,7 @@ func (c *Command) Run(ctx context.Context, e chan struct{}) error {
 
 func (c *Command) Start(ctx context.Context) error {
 	c.KillAll()
-	cmd := exec.CommandContext(ctx, c.cmdStrings[0], c.cmdStrings[1:]...)
+	cmd := exec.CommandContext(ctx, "bash", "-c", c.cmdString)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
