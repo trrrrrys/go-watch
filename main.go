@@ -17,19 +17,40 @@ import (
 	"golang.org/x/exp/slices"
 )
 
+type stringFlags struct {
+	values []string
+}
+
+func (s *stringFlags) String() string {
+	return strings.Join(s.values, " ")
+}
+
+func (s *stringFlags) Set(str string) error {
+	if s.values != nil {
+		s.values = append(s.values, str)
+	} else {
+		s.values = []string{str}
+	}
+	return nil
+}
+
 var (
-	watchTarget   string
+	watchTarget   stringFlags
 	watchInterval int
 	tick          int
+	varbose       bool
 )
 
-const defaultTarget = "./"
+var defaultTarget = stringFlags{
+	values: []string{"./"},
+}
 
 func init() {
 	log.SetFlags(log.Lshortfile)
-	flag.StringVar(&watchTarget, "w", "", "watch target. if not specified, the current directory is the target.")
+	flag.Var(&watchTarget, "w", "watch target. if not specified, the current directory is the target.")
 	flag.IntVar(&watchInterval, "i", 100, "watch interval (ms)")
 	flag.IntVar(&tick, "t", 0, "run every t ms")
+	flag.BoolVar(&varbose, "v", false, "output varbose log")
 }
 
 func main() {
@@ -65,35 +86,37 @@ func run() error {
 		wt = defaultTarget
 	}
 
-	if wt != "" {
-		st, err := os.Stat(wt)
-		if err != nil {
-			return err
-		}
+	if len(wt.values) != 0 {
+		for _, v := range wt.values {
+			st, err := os.Stat(v)
+			if err != nil {
+				return err
+			}
 
-		if st.IsDir() {
-			walk(ctx, wt, events)
-		} else {
-			go watch(ctx, wt, events)
+			if st.IsDir() {
+				walk(ctx, v, events)
+			} else {
+				go watch(ctx, v, events)
+			}
 		}
-
-		go func() {
-			sig := make(chan os.Signal, 1)
-			signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
-			<-sig
-			cancel()
-		}()
+		// 初回プロセス用
+		events <- struct{}{}
 	}
 
-	// 初回プロセス用
-	events <- struct{}{}
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+		<-sig
+		cancel()
+	}()
+
 	cmd := NewCommand(command)
 	return cmd.Run(ctx, events)
 }
 
 func walk(ctx context.Context, target string, e chan struct{}) {
 	if slices.Contains([]string{".git", ".github", "node_modules"}, target) {
-		fmt.Fprintf(os.Stdout, "skip: %s\n", target)
+		Info(LogSkip, target)
 		return
 	}
 	files, err := os.ReadDir(target)
@@ -106,7 +129,7 @@ func walk(ctx context.Context, target string, e chan struct{}) {
 				walk(ctx, path.Join(target, v.Name()), e)
 			} else {
 				// if strings.HasPrefix(v.Name(), ".") {
-				// 	fmt.Fprintf(os.Stdout, "skip: %s\n", v.Name())
+				// 	varboseLogf("skip: %s\n", v.Name())
 				// 	return
 				// }
 				go watch(ctx, path.Join(target, v.Name()), e)
@@ -116,7 +139,7 @@ func walk(ctx context.Context, target string, e chan struct{}) {
 }
 
 func watch(ctx context.Context, filename string, e chan struct{}) {
-	fmt.Fprintf(os.Stdout, "watch: %s\n", filename)
+	Info(LogWatch, filename)
 	info, _ := os.Stat(filename)
 	lastModified := info.ModTime()
 
@@ -131,6 +154,7 @@ func watch(ctx context.Context, filename string, e chan struct{}) {
 			if info.ModTime() != lastModified {
 				lastModified = info.ModTime()
 				e <- struct{}{}
+				fmt.Fprintf(os.Stdout, "write: %s\n", info.Name())
 			}
 			time.Sleep(time.Duration(watchInterval) * time.Millisecond)
 		}
@@ -144,7 +168,7 @@ type Command struct {
 }
 
 func NewCommand(cmd []string) *Command {
-	fmt.Fprintf(os.Stdout, "exec: %s\n", strings.Join(cmd, " "))
+	Info(LogExec, strings.Join(cmd, " "))
 	return &Command{
 		cmdString: strings.Join(cmd, " "),
 	}
@@ -176,7 +200,7 @@ func (c *Command) Start(ctx context.Context) error {
 	}
 	c.Lock()
 	defer c.Unlock()
-	fmt.Fprintf(os.Stdout, "start process: %d\n", cmd.Process.Pid)
+	Info(LogStart, "pid = %d\n", cmd.Process.Pid)
 	c.cmdProcess = append(c.cmdProcess, cmd)
 	return nil
 }
@@ -187,11 +211,11 @@ func (p *Command) KillAll() {
 	pp := make([]*exec.Cmd, len(p.cmdProcess))
 	copy(pp, p.cmdProcess)
 	for i, v := range pp {
-		fmt.Fprintf(os.Stdout, "terminate process: %d", v.Process.Pid)
+		Info(LogTerm, "PID = %d", v.Process.Pid)
 		if err := syscall.Kill(-v.Process.Pid, syscall.SIGTERM); err != nil && err != syscall.EPERM {
 			panic(err)
 		}
-		fmt.Fprintf(os.Stdout, " - ok\n")
+		Info(LogTerm, "PID = %d - OK", v.Process.Pid)
 		_, _ = v.Process.Wait()
 		p.cmdProcess = slices.Delete(p.cmdProcess, i, i+1)
 	}
