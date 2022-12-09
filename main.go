@@ -27,8 +27,8 @@ const defaultTarget = "./"
 
 func init() {
 	log.SetFlags(log.Lshortfile)
-	flag.StringVar(&watchTarget, "f", "", "watch target. if not specified, the current directory is the target.")
-	flag.IntVar(&watchInterval, "w", 100, "watch interval (ms)")
+	flag.StringVar(&watchTarget, "w", "", "watch target. if not specified, the current directory is the target.")
+	flag.IntVar(&watchInterval, "i", 100, "watch interval (ms)")
 	flag.IntVar(&tick, "t", 0, "run every t ms")
 }
 
