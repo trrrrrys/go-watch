@@ -1,4 +1,4 @@
-package main
+package watch
 
 import (
 	"context"
@@ -18,11 +18,12 @@ import (
 )
 
 type stringFlags struct {
-	values []string
+	values        []string
+	defaultValues []string
 }
 
 func (s *stringFlags) String() string {
-	return strings.Join(s.values, " ")
+	return strings.Join(s.values, ", ")
 }
 
 func (s *stringFlags) Set(str string) error {
@@ -34,36 +35,37 @@ func (s *stringFlags) Set(str string) error {
 	return nil
 }
 
+func (s *stringFlags) SetDefault() {
+	if s.values == nil || len(s.values) == 0 {
+		s.values = s.defaultValues
+	}
+}
+
 var (
-	watchTarget   stringFlags
+	watches stringFlags = stringFlags{
+		defaultValues: []string{"./"},
+	}
+	excludes stringFlags = stringFlags{
+		defaultValues: []string{".git", ".github", "node_module"},
+	}
 	watchInterval int
 	tick          int
 	varbose       bool
 )
 
-var defaultTarget = stringFlags{
-	values: []string{"./"},
-}
-
 func init() {
 	log.SetFlags(log.Lshortfile)
-	flag.Var(&watchTarget, "w", "watch target. if not specified, the current directory is the target.")
-	flag.IntVar(&watchInterval, "i", 100, "watch interval (ms)")
-	flag.IntVar(&tick, "t", 0, "run every t ms")
+	flag.Var(&watches, "w", "watch target")
+	flag.Var(&excludes, "e", "exclude target")
+	flag.IntVar(&tick, "t", 0, "run every t s")
 	flag.BoolVar(&varbose, "v", false, "output varbose log")
+	flag.IntVar(&watchInterval, "i", 100, "watch interval (ms)")
 }
 
-func main() {
-	if err := run(); err != nil {
-		fmt.Fprintf(os.Stdout, "watch error: %v", err)
-		os.Exit(1)
-	}
-}
-
-func run() error {
+func Run() error {
 	flag.Parse()
+	excludes.SetDefault()
 	command := flag.Args()
-	wt := watchTarget
 
 	events := make(chan struct{}, 1)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -83,11 +85,11 @@ func run() error {
 			}
 		}()
 	} else {
-		wt = defaultTarget
+		watches.SetDefault()
 	}
 
-	if len(wt.values) != 0 {
-		for _, v := range wt.values {
+	if len(watches.values) != 0 {
+		for _, v := range watches.values {
 			st, err := os.Stat(v)
 			if err != nil {
 				return err
@@ -115,7 +117,7 @@ func run() error {
 }
 
 func walk(ctx context.Context, target string, e chan struct{}) {
-	if slices.Contains([]string{".git", ".github", "node_modules"}, target) {
+	if slices.Contains(excludes.values, target) {
 		Info(LogSkip, target)
 		return
 	}
@@ -140,7 +142,13 @@ func walk(ctx context.Context, target string, e chan struct{}) {
 
 func watch(ctx context.Context, filename string, e chan struct{}) {
 	Info(LogWatch, filename)
-	info, _ := os.Stat(filename)
+	// info, _ := os.Stat(filename)
+	info, err := os.Stat(filename)
+	if err != nil {
+		fmt.Fprintf(os.Stdout, "err: %v\n", err)
+		return
+	}
+
 	lastModified := info.ModTime()
 
 	for {
@@ -150,6 +158,8 @@ func watch(ctx context.Context, filename string, e chan struct{}) {
 			return
 		default:
 			info, _ := os.Stat(filename)
+			// id := info.Sys().(*syscall.Stat_t).Ino
+			// Info(LogWatch, fmt.Sprintf("update from pid: %d", id))
 
 			if info.ModTime() != lastModified {
 				lastModified = info.ModTime()
@@ -189,12 +199,24 @@ func (c *Command) Run(ctx context.Context, e chan struct{}) error {
 	}
 }
 
+type CustomError struct {
+	stderr *os.File
+}
+
+func (e CustomError) Write(b []byte) (n int, err error) {
+	// return e.stderr.Write(append([]byte("========\n"), b...))
+	// return e.stderr.Write(append(append([]byte("\x1b[31m"), b...), []byte("\x1b[0m")...))
+	return e.stderr.Write(b)
+}
+
 func (c *Command) Start(ctx context.Context) error {
 	c.KillAll()
 	cmd := exec.CommandContext(ctx, "bash", "-c", c.cmdString)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// cmd.Stderr = os.Stderr
+	cmd.Stderr = CustomError{os.Stderr}
+	// cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		return err
 	}

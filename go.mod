@@ -1,4 +1,4 @@
-module github.com/trrrrrys/watch
+module github.com/trrrrrys/go-watch
 
 go 1.19
 
